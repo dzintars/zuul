@@ -1,6 +1,6 @@
 - name: Check if {{ project }} project exists
   uri:
-    url: http://gerrit:8080/projects/{{ project }}
+    url: http://gerrit:9280/projects/{{ project }}
     status_code: 200, 404
   register: project_check
 - name: Create {{ project }}
@@ -11,7 +11,7 @@
       register: project_tmp
     - name: Create {{ project }} project in Gerrit
       uri:
-        url: http://gerrit:8080/a/projects/{{ project }}
+        url: http://gerrit:9280/a/projects/{{ project }}
         method: PUT
         user: admin
         password: secret
@@ -33,5 +33,5 @@
           EOF
           git add .gitreview
           git commit -m "Initial commit"
-          git remote add gerrit http://admin:secret@gerrit:8080/{{ project }}
+          git remote add gerrit http://admin:secret@gerrit:9280/{{ project }}
           git push -f --set-upstream gerrit +HEAD:master

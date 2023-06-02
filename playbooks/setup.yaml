@@ -30,14 +30,14 @@
     # you hit the web server; get past that.
     - name: Get Gerrit first login screen
       uri:
-        url: http://gerrit:8080/a/accounts/self/sshkeys
+        url: http://gerrit:9280/a/accounts/self/sshkeys
         method: GET
         user: admin
         password: secret
       ignore_errors: true
     - name: Add admin SSH key to Gerrit
       uri:
-        url: http://gerrit:8080/a/accounts/self/sshkeys
+        url: http://gerrit:9280/a/accounts/self/sshkeys
         method: POST
         user: admin
         password: secret
@@ -68,7 +68,7 @@
         set -e
         git config user.email 'admin@example.com'
         git commit -a -m 'update config'
-        git push http://admin:secret@gerrit:8080/All-Projects +HEAD:refs/meta/config
+        git push http://admin:secret@gerrit:9280/All-Projects +HEAD:refs/meta/config
       args:
         chdir: "{{ all_projects_repo }}"
         warn: false
@@ -94,13 +94,13 @@
     # the Zuul scheduler to start.
     - name: Check if zuul user exists
       uri:
-        url: http://gerrit:8080/accounts/zuul
+        url: http://gerrit:9280/accounts/zuul
         status_code: 200, 404
       register: zuul_user_check
     - name: Create zuul Gerrit account
       when: zuul_user_check.status==404
       uri:
-        url: http://gerrit:8080/a/accounts/zuul
+        url: http://gerrit:9280/a/accounts/zuul
         method: PUT
         user: admin
         password: secret

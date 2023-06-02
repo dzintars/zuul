@@ -1,0 +1,323 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zuul
+  namespace: oswee
+  labels:
+    app: zuul
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zuul
+  template:
+    metadata:
+      labels:
+        app: zuul
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: gerrit
+          image: docker.io/gerritcodereview/gerrit:latest
+          imagePullPolicy: IfNotPresent
+          workingDir: /var/gerrit
+          env:
+            - name: CANONICAL_WEB_URL
+              # Add it to /etc/hosts
+              value: http://localhost:9280/
+            - name: HTTPD_LISTEN_URL
+              value: http://*:9280
+          ports:
+            - name: http
+              containerPort: 9280
+              hostPort: 9280
+              protocol: TCP
+            - name: ssh
+              containerPort: 29418
+              hostPort: 29418
+              protocol: TCP
+          networks:
+            - name: zuul
+          volumeMounts:
+            - name: zuul-pvc-gerrit
+              mountPath: /var/gerrit:z
+
+        - name: gerritconfig
+          image: docker.io/zuul/zuul-executor:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # - name: http_proxy
+            #   value: http://proxy.example.com:808
+            # - name: https_proxy
+            #   value: http://proxy.example.com:8080
+            - name: http_proxy
+              value: ${http_proxy}
+            - name: https_proxy
+              value: ${https_proxy}
+            - name: no_proxy
+              value: ${no_proxy},gerrit
+              # value: localhost,127.0.0.1
+          depends_on:
+            - gerrit
+          volumeMounts:
+            - name: zuul-pvc-sshkey
+              mountPath: /var/ssh:z
+            - name: zuul-pvc-nodessh
+              mountPath: /var/node:z
+            - name: zuul-pvc-playbooks
+              mountPath: /var/playbooks/:Z
+            - name: zuul-pvc-certs
+              mountPath: /var/certs:Z
+            - name: zuul-pvc-tools
+              mountPath: /var/zuul-tools/:z
+          command:
+            - /usr/local/lib/zuul/ansible/6/bin/ansible-playbook
+            - /var/playbooks/setup.yaml
+          networks:
+            - zuul
+
+        - name: zk
+          image: docker.io/zookeeper:latest
+          imagePullPolicy: IfNotPresent
+          hostname: examples_zk_1.examples_default
+          volumeMounts:
+            - name: zuul-pvc-playbooks
+              mountPath: /var/playbooks/:Z
+            - name: zuul-pvc-certs
+              mountPath: /var/certs:Z
+            - name: zuul-pvc-zoo
+              mountPath: /conf/zoo.cfg:z
+          command: ["/bin/sh", "-c"]
+          args: ["ls /usr/local; /var/playbooks/wait-to-start-certs.sh; zkServer.sh start-foreground"]
+          networks:
+            - zuul
+
+        - name: mysql
+          image: docker.io/mariadb:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: rootpassword
+            - name: MYSQL_DATABASE
+              value: zuul
+            - name: MYSQL_USER
+              value: zuul
+            - name: MYSQL_PASSWORD
+              value: secret
+            - name: MYSQL_INITDB_SKIP_TZINFO
+              value: '1'
+          networks:
+            - zuul
+
+        - name: scheduler
+          # FIXME: The scheduler has no ansible anymore so use the executor image.
+          #        This needs to be changes such that ansible is not required for startup.
+          image: docker.io/zuul/zuul-scheduler:latest
+          depends_on:
+            - gerritconfig
+            - zk
+            - mysql
+          env:
+            - name: http_proxy
+              value: ${http_proxy}
+            - name: https_proxy
+              value: ${https_proxy}
+            - name: no_proxy
+              value: ${no_proxy},gerrit
+            - name: ZUUL_MYSQL_PASSWORD
+              value: secret
+          command: ["/bin/sh", "-c"]
+          args: ["/var/playbooks/wait-to-start-certs.sh; /var/playbooks/wait-to-start.sh; zuul-scheduler -f"]
+          volumeMounts:
+            - name: zuul-pvc-playbooks
+              mountPath: /var/playbooks/:Z
+            - name: zuul-pvc-certs
+              mountPath: /var/certs:Z
+            - name: zuul-pvc-sshkey
+              mountPath: /var/ssh:z
+            - name: zuul-pvc-etc-zuul
+              mountPath: /etc/zuul/:Z
+          networks:
+            - zuul
+
+        - name: web
+          image: docker.io/zuul/zuul-web:latest
+          command: ["/bin/sh", "-c"]
+          args: ["/var/playbooks/wait-to-start-certs.sh; zuul-web -f"]
+          depends_on:
+            - scheduler
+            - mysql
+          ports:
+            - name: http
+              containerPort: 9000
+              hostPort: 9290
+              protocol: TCP
+          env:
+            - name: ZUUL_MYSQL_PASSWORD
+              value: secret
+          volumeMounts:
+            - name: zuul-pvc-etc-zuul
+              mountPath: /etc/zuul/:Z
+            - name: zuul-pvc-playbooks
+              mountPath: /var/playbooks/:Z
+            - name: zuul-pvc-certs
+              mountPath: /var/certs:Z
+          networks:
+            - zuul
+
+        - name: executor
+          image: docker.io/zuul/zuul-executor:latest
+          securityContext:
+            privileged: true
+            # runAsUser: 1000
+            # allowPrivilegeEscalation: true
+            # readOnlyRootFilesystem: false
+            # seLinuxOptions: {}
+            # capabilities:
+            #   add:
+            #     - 'NET_ADMIN'
+          env:
+            - name: http_proxy
+              value: http_proxy
+            - name: https_proxy
+              value: https_proxy
+            - name: no_proxy
+              value: ${no_proxy},gerrit,scheduler
+            - name: ZUUL_MYSQL_PASSWORD
+              value: secret
+          depends_on:
+            - scheduler
+          volumeMounts:
+            - name: zuul-pvc-etc-zuul
+              mountPath: /etc/zuul/:Z
+            - name: zuul-pvc-playbooks
+              mountPath: /var/playbooks/:Z
+            - name: zuul-pvc-certs
+              mountPath: /var/certs:Z
+            - name: zuul-pvc-sshkey
+              mountPath: /var/ssh:z
+            - name: zuul-pvc-logs
+              mountPath: /srv/static/logs:Z
+          command: ["/bin/sh", "-c"]
+          args: ["/var/playbooks/wait-to-start-certs.sh; zuul-executor -f"]
+          networks:
+            - zuul
+
+        - name: launcher
+          image: docker.io/zuul/nodepool-launcher:latest
+          depends_on:
+            - zk
+          volumeMounts:
+            - name: zuul-pvc-playbooks
+              mountPath: /var/playbooks/:Z
+            - name: zuul-pvc-etc-nodepool
+              mountPath: /etc/nodepool/:z
+            - name: zuul-pvc-certs
+              mountPath: /var/certs:Z
+          ports:
+            - name: http
+              containerPort: 8005
+              hostPort: 9205
+              protocol: TCP
+          command: ["/bin/sh", "-c"]
+          args: ["/var/playbooks/wait-to-start-certs.sh; nodepool-launcher -f"]
+          networks:
+            - zuul
+
+        - name: node
+          image: ubuntu-22.04-nodepool:latest
+          env:
+            - name: http_proxy
+              value: ${http_proxy}
+            - name: https_proxy
+              value: ${https_proxy}
+            - name: no_proxy
+              value: ${no_proxy},gerrit
+          # build:
+          #   dockerfile: node.Containerfile
+          #   context: ./
+          #   args:
+          #     http_proxy: "${http_proxy}"
+          #     https_proxy: "${http_proxy}"
+          #     no_proxy: "${no_proxy},gerrit"
+          volumeMounts:
+            - name: zuul-pvc-nodessh
+              mountPath: /root/.ssh:z
+          networks:
+            - zuul
+
+        - name: logs
+          image: httpd-alpine:latest
+          env:
+            - name: http_proxy
+              value: ${http_proxy}
+            - name: https_proxy
+              value: ${https_proxy}
+            - name: no_proxy
+              value: ${no_proxy}
+          # args: ["/var/playbooks/wait-to-start-certs.sh; nodepool-launcher -f"]
+          # build:
+          #   dockerfile: logs.Containerfile
+          #   context: ./
+          #   args:
+          #     http_proxy: "${http_proxy}"
+          #     https_proxy: "${http_proxy}"
+          #     no_proxy: "${no_proxy}"
+          ports:
+            - name: http
+              containerPort: 80
+              hostPort: 9281
+              protocol: TCP
+          volumeMounts:
+            - name: zuul-pvc-logs
+              mountPath: /usr/local/apache2/htdocs:z
+          networks:
+            - zuul
+
+        - name: net
+          image: fedora-net:latest
+          networks:
+            - zuul
+
+      # networks:
+      #   - name: zuul
+      #     driver: macvlan
+
+      volumes:
+        - name: zuul-pvc-gerrit
+          persistentVolumeClaim:
+            claimName: zuul-pvc-gerrit
+        - name: zuul-pvc-sshkey
+          persistentVolumeClaim:
+            claimName: zuul-pvc-sshkey
+        - name: zuul-pvc-nodessh
+          persistentVolumeClaim:
+            claimName: zuul-pvc-nodessh
+        - name: zuul-pvc-logs
+          persistentVolumeClaim:
+            claimName: zuul-pvc-logs
+        - name: zuul-pvc-certs
+          persistentVolumeClaim:
+            claimName: zuul-pvc-certs
+        - name: zuul-pvc-playbooks
+          hostPath:
+            path: /home/dzintars/code/opendev.org/zuul/zuul/doc/source/examples/playbooks/
+            type: Directory
+        - name: zuul-pvc-tools
+          hostPath:
+            path: /home/dzintars/code/opendev.org/zuul/zuul/tools/
+            type: Directory
+        - name: zuul-pvc-zoo
+          hostPath:
+            path: /home/dzintars/code/opendev.org/zuul/zuul/doc/source/examples/zoo.cfg
+            type: File
+        - name: zuul-pvc-etc-zuul
+          hostPath:
+            path: /home/dzintars/code/opendev.org/zuul/zuul/doc/source/examples/etc_zuul/
+            type: Directory
+        - name: zuul-pvc-etc-nodepool
+          hostPath:
+            path: /home/dzintars/code/opendev.org/zuul/zuul/doc/source/examples/etc_nodepool/
+            type: Directory
+...
