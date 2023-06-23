@@ -37,8 +37,6 @@ spec:
               containerPort: 29418
               hostPort: 29418
               protocol: TCP
-          networks:
-            - name: zuul
           volumeMounts:
             - name: zuul-pvc-gerrit-etc
               mountPath: /var/gerrit/etc
@@ -50,17 +48,22 @@ spec:
               mountPath: /var/gerrit/index
             - name: zuul-pvc-gerrit-cache
               mountPath: /var/gerrit/cache
+          networks:
+            - name: zuul
 
         - name: gerritconfig
           image: docker.io/zuul/zuul-executor:latest
           imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/lib/zuul/ansible/6/bin/ansible-playbook
+            - /var/playbooks/setup.yaml
+          depends_on:
+            - gerrit
           env:
             - name: http_proxy
             - name: https_proxy
             - name: no_proxy
               value: localhost,gerrit
-          depends_on:
-            - gerrit
           volumeMounts:
             - name: zuul-pvc-sshkey
               mountPath: /var/ssh:z
@@ -74,9 +77,6 @@ spec:
               mountPath: /var/zuul-tools/:z
             - name: zuul-pvc-lib-zuul-executor
               mountPath: /var/lib/zuul:z
-          command:
-            - /usr/local/lib/zuul/ansible/6/bin/ansible-playbook
-            - /var/playbooks/setup.yaml
           networks:
             - zuul
 
@@ -84,6 +84,8 @@ spec:
           image: docker.io/zookeeper:latest
           imagePullPolicy: IfNotPresent
           hostname: examples_zk_1.examples_default
+          command: ["/bin/sh", "-c"]
+          args: ["ls /usr/local; /var/playbooks/wait-to-start-certs.sh; zkServer.sh start-foreground"]
           volumeMounts:
             - name: zuul-pvc-playbooks
               mountPath: /var/playbooks/:Z
@@ -95,8 +97,6 @@ spec:
               mountPath: /data
             - name: zuul-pvc-zk-datalog
               mountPath: /datalog
-          command: ["/bin/sh", "-c"]
-          args: ["ls /usr/local; /var/playbooks/wait-to-start-certs.sh; zkServer.sh start-foreground"]
           networks:
             - zuul
 
@@ -114,16 +114,19 @@ spec:
               value: secret
             - name: MYSQL_INITDB_SKIP_TZINFO
               value: '1'
-          networks:
-            - zuul
           volumeMounts:
             - name: zuul-pvc-lib-mysql
               mountPath: /var/lib/mysql
+          networks:
+            - zuul
 
         - name: scheduler
           # FIXME: The scheduler has no ansible anymore so use the executor image.
           #        This needs to be changes such that ansible is not required for startup.
           image: docker.io/zuul/zuul-scheduler:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args: ["/var/playbooks/wait-to-start-certs.sh; /var/playbooks/wait-to-start.sh; zuul-scheduler -f"]
           depends_on:
             - zk
             - mysql
@@ -134,8 +137,6 @@ spec:
               value: localhost,gerrit
             - name: ZUUL_MYSQL_PASSWORD
               value: secret
-          command: ["/bin/sh", "-c"]
-          args: ["/var/playbooks/wait-to-start-certs.sh; /var/playbooks/wait-to-start.sh; zuul-scheduler -f"]
           volumeMounts:
             - name: zuul-pvc-playbooks
               mountPath: /var/playbooks/:Z
@@ -152,19 +153,20 @@ spec:
 
         - name: web
           image: docker.io/zuul/zuul-web:latest
+          imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
           args: ["/var/playbooks/wait-to-start-certs.sh; zuul-web -f"]
           depends_on:
             - scheduler
             - mysql
+          env:
+            - name: ZUUL_MYSQL_PASSWORD
+              value: secret
           ports:
             - name: http
               containerPort: 9000
               hostPort: 9290
               protocol: TCP
-          env:
-            - name: ZUUL_MYSQL_PASSWORD
-              value: secret
           volumeMounts:
             - name: zuul-pvc-etc-zuul
               mountPath: /etc/zuul/:Z
@@ -179,15 +181,14 @@ spec:
 
         - name: executor
           image: docker.io/zuul/zuul-executor:latest
+          imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
-            # runAsUser: 1000
-            # allowPrivilegeEscalation: true
-            # readOnlyRootFilesystem: false
-            # seLinuxOptions: {}
-            # capabilities:
-            #   add:
-            #     - 'NET_ADMIN'
+            allowPrivilegeEscalation: true
+          command: ["/bin/sh", "-c"]
+          args: ["/var/playbooks/wait-to-start-certs.sh; zuul-executor -f"]
+          depends_on:
+            - scheduler
           env:
             - name: http_proxy
             - name: https_proxy
@@ -195,8 +196,6 @@ spec:
               value: localhost,gerrit,scheduler
             - name: ZUUL_MYSQL_PASSWORD
               value: secret
-          depends_on:
-            - scheduler
           volumeMounts:
             - name: zuul-pvc-etc-zuul
               mountPath: /etc/zuul/:Z
@@ -210,13 +209,14 @@ spec:
               mountPath: /srv/static/logs:Z
             - name: zuul-pvc-lib-zuul-executor
               mountPath: /var/lib/zuul:Z
-          command: ["/bin/sh", "-c"]
-          args: ["/var/playbooks/wait-to-start-certs.sh; zuul-executor -f"]
           networks:
             - zuul
 
         - name: launcher
           image: docker.io/zuul/nodepool-launcher:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args: ["/var/playbooks/wait-to-start-certs.sh; nodepool-launcher -f"]
           depends_on:
             - zk
           volumeMounts:
@@ -231,18 +231,16 @@ spec:
               containerPort: 8005
               hostPort: 9205
               protocol: TCP
-          command: ["/bin/sh", "-c"]
-          args: ["/var/playbooks/wait-to-start-certs.sh; nodepool-launcher -f"]
           networks:
             - zuul
 
         - name: node
           image: ubuntu-22.04-nodepool:latest
+          securityContext:
+            privileged: true
           env:
             - name: http_proxy
-              # value: http_proxy
             - name: https_proxy
-              # value: https_proxy
             - name: no_proxy
               value: localhost,gerrit
           volumeMounts:
@@ -255,12 +253,8 @@ spec:
           image: httpd-alpine:latest
           env:
             - name: http_proxy
-              # value: http_proxy
             - name: https_proxy
-              # value: https_proxy
             - name: no_proxy
-              # value: no_proxy
-          # args: ["/var/playbooks/wait-to-start-certs.sh; nodepool-launcher -f"]
           ports:
             - name: http
               containerPort: 80
@@ -271,10 +265,6 @@ spec:
               mountPath: /usr/local/apache2/htdocs:z
           networks:
             - zuul
-
-      # networks:
-      #   - name: zuul
-      #     driver: macvlan
 
       volumes:
         - name: zuul-pvc-gerrit-etc
